@@ -42,7 +42,9 @@
   // jdk.internal.util.ArraysSupport.vectorizedHashCode
   void arrays_hashcode(Register ary, Register cnt, Register result, FloatRegister vtmp1,
                        FloatRegister vtmp2, FloatRegister vtmp3, FloatRegister vtmp4,
-                       FloatRegister vtmp5, BasicType eltype);
+                       FloatRegister vtmp5, FloatRegister vtmp6, FloatRegister vtmp7,
+                       FloatRegister vtmp8, FloatRegister vtmp9, FloatRegister vtmp10,
+                       BasicType eltype);
 
   // Code used by cmpFastLock and cmpFastUnlock mach instructions in .ad file.
   void fast_lock(Register object, Register box, Register tmp, Register tmp2, Register tmp3);

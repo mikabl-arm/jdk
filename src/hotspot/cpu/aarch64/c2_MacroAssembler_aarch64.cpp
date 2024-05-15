@@ -50,22 +50,26 @@ typedef void (MacroAssembler::* chr_insn)(Register Rt, const Address &adr);
 void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register result,
                                         FloatRegister vtmp1, FloatRegister vtmp2,
                                         FloatRegister vtmp3, FloatRegister vtmp4,
-                                        FloatRegister vtmp5, BasicType eltype) {
+                                        FloatRegister vtmp5, FloatRegister vtmp6,
+                                        FloatRegister vtmp7, FloatRegister vtmp8,
+                                        FloatRegister vtmp9, FloatRegister vtmp10,
+                                        BasicType eltype) {
   assert_different_registers(ary, cnt, result, rscratch1, rscratch2);
   assert_different_registers(vtmp1, vtmp2, vtmp3, vtmp4);
 
   Register      tmp1 = rscratch1, tmp2 = rscratch2;
-  FloatRegister vdata = vtmp1;
-  FloatRegister vmultiplication = vtmp2;
-  FloatRegister vpow0to3 = vtmp3;
-  FloatRegister vpow4 = vtmp4;
+  FloatRegister vdata0 = vtmp1, vdata1 = vtmp2, vdata2 = vtmp3, vdata3 = vtmp4;
+  FloatRegister vmul0 = vtmp5, vmul1 = vtmp6, vmul2 = vtmp7, vmul3 = vtmp8;
+  FloatRegister vpow = vtmp9; // <31^(4*k+3), ..., 31^(4*k+0)>
+  FloatRegister vpowm = vtmp10; // multiple of loop factor power of 31, i.e. <31^16, ..., 31^16> for ints
 
   Label ENTRY, TAIL, RELATIVE, PREHEADER, LOOP, DONE;
 
-  const size_t unroll_factor = 7;
-  const size_t loop_factor = eltype == T_BOOLEAN || eltype == T_BYTE                    ? 8
-                             : eltype == T_CHAR || eltype == T_SHORT || eltype == T_INT ? 4
-                                                                                        : 0;
+  const size_t unroll_factor = 4;
+  const size_t loop_factor = eltype == T_BOOLEAN || eltype == T_BYTE ? 8
+                             : eltype == T_CHAR || eltype == T_SHORT ? 4
+                             : eltype == T_INT                       ? 16
+                                                                     : 0;
   guarantee(loop_factor, "unsupported eltype");
 
   switch (eltype) {
@@ -87,97 +91,31 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
   //    goto .PREHEADER;
   bind(ENTRY);
 
-  if (unroll_factor + 1 != loop_factor) {
-    cmpw(cnt, unroll_factor + 1);
-    subw(cnt, cnt, loop_factor);
-  } else {
-    subsw(cnt, cnt, loop_factor);
-  }
-
+  subsw(cnt, cnt, loop_factor);
   br(Assembler::HS, PREHEADER);
 
-  // Emit unrolled scalar tail loop. No SIMD instructions in this block.
-  //
-  // Pseudocode:
-  //
-  //  cnt -= unroll_factor + 1 - loop_factor;
-  //  switch (cnt) {
-  //  case -1:
-  //    ret = ret * 31 + *ary;
-  //    ary++;
-  //  case -2:
-  //    ret = ret * 31 + *ary;
-  //    ary++;
-  //  ...
-  //  case -unroll_factor:
-  //    ret = ret * 31 + *ary;
-  //    ary++;
-  //  case -(unroll_factor + 1):
-  //    break;
-  //  }
-  //  goto .DONE
   bind(TAIL);
 
-  size_t compensate = unroll_factor + 1 - loop_factor;
-  if (compensate) {
-    subw(cnt, cnt, compensate);
-  }
-
+  assert(is_power_of_2(unroll_factor), "cant use this value to calculate the jump target PC");
+  orr(tmp2, cnt, 0x1fff ^ (unroll_factor - 1));
   adr(tmp1, RELATIVE);
-  subs(tmp1, tmp1, cnt, ext::sxtw, 3);
-
-  bind(RELATIVE);
+  sub(tmp1, tmp1, tmp2, ext::sxtw, 3);
   movw(tmp2, 0x1f);
+  addw(cnt, cnt, loop_factor);
+
   br(tmp1);
 
+  bind(RELATIVE);
   for (size_t i = 0; i < unroll_factor; ++i) {
     arrays_hashcode_elload(tmp1, Address(post(ary, arrays_hashcode_elsize(eltype))), eltype);
     maddw(result, result, tmp2, tmp1);
   }
+  subsw(cnt, cnt, unroll_factor);
+  br(Assembler::HI, RELATIVE);
 
   b(DONE);
 
-  // Put 0-4'th powers of 31 into registers. The 0-3'th go to a single SIMD register together.
-  //
-  // Pseudocode:
-  //
-  //  vpow0to3 = {1, 31, 31^2, 31^3};
-  //  pow4 = 31^4;
   bind(PREHEADER);
-
-  movw(tmp1, 0x745f);
-  movw(tmp2, 0x3c1);
-  mov(vpow0to3, Assembler::S, 0, tmp1);
-  mov(vpow0to3, Assembler::S, 1, tmp2);
-  movw(tmp1, 0x1f);
-  movw(tmp2, 0x1);
-  mov(vpow0to3, Assembler::S, 2, tmp1);
-  mov(vpow0to3, Assembler::S, 3, tmp2);
-
-  movw(tmp1, 0x1781);
-  movkw(tmp1, 0xe, 16);
-  dup(vpow4, T4S, tmp1);
-
-  mov(vmultiplication, Assembler::T16B, 0);
-  mov(vmultiplication, Assembler::S, 3, result);
-
-  // TODO: redo
-  // Neon loop. Loads 4 or 8 elements per iteration.
-  //
-  // Pseudocode:
-  //
-  //  for (; cnt >= 0; cnt -= loop_factor)
-  //    for (int i = 0; i += 4; i < loop_factor) {
-  //      // This is executed twice for T_BOOLEAN and T_BYTE types and just once for all other types.
-  //      // But even for T_BOOLEAN and T_BYTE this is a single 8B load.
-  //      data = <eltype[4]> *ary * vpow0to3;
-  //      ary += 4;
-  //      addend = sum(data);
-  //      result = result * pow4 + addend;
-  //    }
-  bind(LOOP);
-
-  mulv(vmultiplication, Assembler::T4S, vmultiplication, vpow4);
 
   size_t                      bytes_per_iteration = loop_factor * arrays_hashcode_elsize(eltype);
   Assembler::SIMD_Arrangement load_arrangement =
@@ -187,49 +125,119 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
                                               : Assembler::INVALID_ARRANGEMENT;
   guarantee(load_arrangement != Assembler::INVALID_ARRANGEMENT, "invalid arrangement");
 
-  ld1(vdata, load_arrangement, Address(post(ary, bytes_per_iteration)));
+  if (eltype == T_INT) {
+    movw(tmp1, 0xde01);
+    movkw(tmp1, 0x50a9, 16);
+    dup(vpowm, T4S, tmp1);
+
+    mov(vmul3, Assembler::T16B, 0);
+    mov(vmul2, Assembler::T16B, 0);
+    mov(vmul1, Assembler::T16B, 0);
+  } else {
+    movw(tmp1, 0x1781);
+    movkw(tmp1, 0xe, 16);
+    dup(vpowm, T4S, tmp1);
+  }
+  mov(vmul0, Assembler::T16B, 0);
+  mov(vmul0, Assembler::S, 3, result);
+
+  bind(LOOP);
+
+  if (eltype == T_INT) {
+    mulv(vmul3, Assembler::T4S, vmul3, vpowm);
+    mulv(vmul2, Assembler::T4S, vmul2, vpowm);
+    mulv(vmul1, Assembler::T4S, vmul1, vpowm);
+    mulv(vmul0, Assembler::T4S, vmul0, vpowm);
+  } else {
+    mulv(vmul0, Assembler::T4S, vmul0, vpowm);
+  }
+
+  if (eltype == T_INT) {
+    ld1(vdata3, vdata2, vdata1, vdata0, load_arrangement, Address(post(ary, bytes_per_iteration)));
+  } else {
+    ld1(vdata0, load_arrangement, Address(post(ary, bytes_per_iteration)));
+  }
 
   if (eltype == T_BOOLEAN || eltype == T_BYTE) {
     // Extend 8B to 8H to be able to use vector multiply instructions
     assert(load_arrangement == Assembler::T8B, "expected to extend 8B to 8H");
     if (is_signed_subword_type(eltype)) {
-      sxtl(vdata, Assembler::T8H, vdata, load_arrangement);
+      sxtl(vdata0, Assembler::T8H, vdata0, load_arrangement);
     } else {
-      uxtl(vdata, Assembler::T8H, vdata, load_arrangement);
+      uxtl(vdata0, Assembler::T8H, vdata0, load_arrangement);
     }
   }
 
   if (load_arrangement == Assembler::T4S) {
-    addv(vmultiplication, load_arrangement, vmultiplication, vdata);
+    addv(vmul3, load_arrangement, vmul3, vdata3);
+    addv(vmul2, load_arrangement, vmul2, vdata2);
+    addv(vmul1, load_arrangement, vmul1, vdata1);
+    addv(vmul0, load_arrangement, vmul0, vdata0);
   } else if (load_arrangement == Assembler::T4H || load_arrangement == Assembler::T8B) {
     assert(is_subword_type(eltype), "subword type expected");
     if (is_signed_subword_type(eltype)) {
-      sxtl(vtmp5, Assembler::T4S, vdata, Assembler::T4H);
+      sxtl(vtmp5, Assembler::T4S, vdata0, Assembler::T4H);
     } else {
-      uxtl(vtmp5, Assembler::T4S, vdata, Assembler::T4H);
+      uxtl(vtmp5, Assembler::T4S, vdata0, Assembler::T4H);
     }
-    addv(vmultiplication, Assembler::T4S, vmultiplication, vtmp5);
+    addv(vmul0, Assembler::T4S, vmul0, vtmp5);
   } else {
     should_not_reach_here();
   }
 
   // Process the upper half of a vector
   if (load_arrangement == Assembler::T8B) {
-    mulv(vmultiplication, Assembler::T4S, vmultiplication, vpow4);
+    mulv(vmul0, Assembler::T4S, vmul0, vpowm);
     if (is_signed_subword_type(eltype)) {
-      sshll2(vtmp5, Assembler::T4S, vdata, Assembler::T8H, 0);
+      sshll2(vtmp5, Assembler::T4S, vdata0, Assembler::T8H, 0);
     } else {
-      ushll2(vtmp5, Assembler::T4S, vdata, Assembler::T8H, 0);
+      ushll2(vtmp5, Assembler::T4S, vdata0, Assembler::T8H, 0);
     }
-    addv(vmultiplication, Assembler::T4S, vmultiplication, vtmp5);
+    addv(vmul0, Assembler::T4S, vmul0, vtmp5);
   }
 
   subsw(cnt, cnt, loop_factor);
   br(Assembler::HS, LOOP);
 
-  mulv(vmultiplication, T4S, vmultiplication, vpow0to3);
-  addv(vmultiplication, Assembler::T4S, vmultiplication);
-  umov(result, vmultiplication, Assembler::S, 0);
+  // Put 0-3'th powers of 31 into a single SIMD register together.
+  movw(tmp1, 0x745f);
+  movw(tmp2, 0x3c1);
+  mov(vpow, Assembler::S, 0, tmp1);
+  mov(vpow, Assembler::S, 1, tmp2);
+  movw(tmp1, 0x1f);
+  movw(tmp2, 0x1);
+  mov(vpow, Assembler::S, 2, tmp1);
+  mov(vpow, Assembler::S, 3, tmp2);
+
+  mulv(vmul0, T4S, vmul0, vpow);
+  addv(vmul0, Assembler::T4S, vmul0);
+  umov(result, vmul0, Assembler::S, 0);
+
+  if (eltype == T_INT) {
+    movw(tmp1, 0x1781);
+    movkw(tmp1, 0xe, 16);
+    dup(vpowm, T4S, tmp1);
+
+    // <31^7, ... ,31^4> = <31^3, ... ,31^0> * 31^4
+    mulv(vpow, Assembler::T4S, vpow,
+         vpowm); // FIXME: above I supposed that vpow4 isn't used for ints
+    mulv(vmul1, T4S, vmul1, vpow);
+    addv(vmul1, Assembler::T4S, vmul1);
+    umov(tmp1, vmul1, Assembler::S, 0);
+    addw(result, result, tmp1);
+
+    mulv(vpow, Assembler::T4S, vpow, vpowm);
+    mulv(vmul2, T4S, vmul2, vpow);
+    addv(vmul2, Assembler::T4S, vmul2);
+    umov(tmp1, vmul2, Assembler::S, 0);
+    addw(result, result, tmp1);
+
+    mulv(vpow, Assembler::T4S, vpow, vpowm);
+    mulv(vmul3, T4S, vmul3, vpow);
+    addv(vmul3, Assembler::T4S, vmul3);
+    umov(tmp1, vmul3, Assembler::S, 0);
+    addw(result, result, tmp1);
+  }
 
   b(TAIL);
 
