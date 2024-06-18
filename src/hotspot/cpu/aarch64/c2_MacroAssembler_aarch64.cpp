@@ -58,7 +58,7 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
   assert_different_registers(vtmp1, vtmp2, vtmp3, vtmp4);
 
   Register      tmp1 = rscratch1, tmp2 = rscratch2;
-  FloatRegister vdata0 = vtmp1, vdata1 = vtmp2, vdata2 = vtmp3, vdata3 = vtmp4;
+  FloatRegister vdata0 = vtmp4, vdata1 = vtmp3, vdata2 = vtmp2, vdata3 = vtmp1;
   FloatRegister vmul0 = vtmp5, vmul1 = vtmp6, vmul2 = vtmp7, vmul3 = vtmp8;
   FloatRegister vpow = vtmp9; // <31^(4*k+3), ..., 31^(4*k+0)>
   FloatRegister vpowm = vtmp10; // multiple of loop factor power of 31, i.e. <31^16, ..., 31^16> for ints
@@ -111,7 +111,7 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
     maddw(result, result, tmp2, tmp1);
   }
   subsw(cnt, cnt, unroll_factor);
-  br(Assembler::HI, RELATIVE);
+  br(Assembler::HS, RELATIVE);
 
   b(DONE);
 
@@ -176,11 +176,11 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
   } else if (load_arrangement == Assembler::T4H || load_arrangement == Assembler::T8B) {
     assert(is_subword_type(eltype), "subword type expected");
     if (is_signed_subword_type(eltype)) {
-      sxtl(vtmp5, Assembler::T4S, vdata0, Assembler::T4H);
+      sxtl(vdata1, Assembler::T4S, vdata0, Assembler::T4H);
     } else {
-      uxtl(vtmp5, Assembler::T4S, vdata0, Assembler::T4H);
+      uxtl(vdata1, Assembler::T4S, vdata0, Assembler::T4H);
     }
-    addv(vmul0, Assembler::T4S, vmul0, vtmp5);
+    addv(vmul0, Assembler::T4S, vmul0, vdata1);
   } else {
     should_not_reach_here();
   }
@@ -189,11 +189,11 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
   if (load_arrangement == Assembler::T8B) {
     mulv(vmul0, Assembler::T4S, vmul0, vpowm);
     if (is_signed_subword_type(eltype)) {
-      sshll2(vtmp5, Assembler::T4S, vdata0, Assembler::T8H, 0);
+      sshll2(vdata1, Assembler::T4S, vdata0, Assembler::T8H, 0);
     } else {
-      ushll2(vtmp5, Assembler::T4S, vdata0, Assembler::T8H, 0);
+      ushll2(vdata1, Assembler::T4S, vdata0, Assembler::T8H, 0);
     }
-    addv(vmul0, Assembler::T4S, vmul0, vtmp5);
+    addv(vmul0, Assembler::T4S, vmul0, vdata1);
   }
 
   subsw(cnt, cnt, loop_factor);
