@@ -62,6 +62,11 @@ class aarch64 {
   static address _zero_blocks;
 
   static address _large_array_equals;
+  static address _large_arrays_hashcode_boolean;
+  static address _large_arrays_hashcode_byte;
+  static address _large_arrays_hashcode_char;
+  static address _large_arrays_hashcode_int;
+  static address _large_arrays_hashcode_short;
   static address _compare_long_string_LL;
   static address _compare_long_string_LU;
   static address _compare_long_string_UL;
@@ -143,6 +148,25 @@ class aarch64 {
 
   static address large_array_equals() {
       return _large_array_equals;
+  }
+
+  static address large_arrays_hashcode(BasicType eltype) {
+    switch (eltype) {
+    case T_BOOLEAN:
+      return _large_arrays_hashcode_boolean;
+    case T_BYTE:
+      return _large_arrays_hashcode_byte;
+    case T_CHAR:
+      return _large_arrays_hashcode_char;
+    case T_SHORT:
+      return _large_arrays_hashcode_short;
+    case T_INT:
+      return _large_arrays_hashcode_int;
+    default:
+      assert(0, "unsupported eltype");
+    }
+
+    return nullptr;
   }
 
   static address compare_long_string_LL() {

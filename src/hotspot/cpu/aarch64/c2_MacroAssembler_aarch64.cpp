@@ -47,28 +47,13 @@
 typedef void (MacroAssembler::* chr_insn)(Register Rt, const Address &adr);
 
 // jdk.internal.util.ArraysSupport.vectorizedHashCode
-void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register result,
-                                        FloatRegister vtmp1, FloatRegister vtmp2,
-                                        FloatRegister vtmp3, FloatRegister vtmp4,
-                                        FloatRegister vtmp5, FloatRegister vtmp6,
-                                        FloatRegister vtmp7, FloatRegister vtmp8,
-                                        FloatRegister vtmp9, FloatRegister vtmp10,
-                                        FloatRegister vtmp11, FloatRegister vtmp12,
-                                        FloatRegister vtmp13, FloatRegister vtmp14,
-                                        BasicType eltype) {
+address C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register result,
+                                           BasicType eltype) {
   assert_different_registers(ary, cnt, result, rscratch1, rscratch2);
-  assert_different_registers(vtmp1, vtmp2, vtmp3, vtmp4, vtmp5, vtmp6, vtmp7,
-                             vtmp8, vtmp9, vtmp10, vtmp11, vtmp12, vtmp13,
-                             vtmp14);
 
-  Register      tmp1 = rscratch1, tmp2 = rscratch2;
-  FloatRegister vdata0 = vtmp4, vdata1 = vtmp3, vdata2 = vtmp2, vdata3 = vtmp1;
-  FloatRegister vhalf0 = vtmp14, vhalf1 = vtmp13, vhalf2 = vtmp12, vhalf3 = vtmp11;
-  FloatRegister vmul0 = vtmp5, vmul1 = vtmp6, vmul2 = vtmp7, vmul3 = vtmp8;
-  FloatRegister vpow = vtmp9; // <31^(4*k+3), ..., 31^(4*k+0)>
-  FloatRegister vpowm = vtmp10; // multiple of loop factor power of 31, i.e. <31^16, ..., 31^16> for ints
+  Register tmp1 = rscratch1, tmp2 = rscratch2;
 
-  Label ENTRY, TAIL, RELATIVE, PREHEADER, LOOP, DONE;
+  Label TAIL, RELATIVE;
 
   const size_t unroll_factor = 4;
   const size_t loop_factor = eltype == T_BOOLEAN || eltype == T_BYTE ? 32
@@ -78,26 +63,36 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
   guarantee(loop_factor, "unsupported eltype");
 
   switch (eltype) {
-    case T_BOOLEAN: BLOCK_COMMENT("arrays_hashcode(unsigned byte) {"); break;
-    case T_CHAR: BLOCK_COMMENT("arrays_hashcode(char) {"); break;
-    case T_BYTE: BLOCK_COMMENT("arrays_hashcode(byte) {"); break;
-    case T_SHORT: BLOCK_COMMENT("arrays_hashcode(short) {"); break;
-    case T_INT: BLOCK_COMMENT("arrays_hashcode(int) {"); break;
-    default: ShouldNotReachHere();
+  case T_BOOLEAN:
+    BLOCK_COMMENT("arrays_hashcode(unsigned byte) {");
+    break;
+  case T_CHAR:
+    BLOCK_COMMENT("arrays_hashcode(char) {");
+    break;
+  case T_BYTE:
+    BLOCK_COMMENT("arrays_hashcode(byte) {");
+    break;
+  case T_SHORT:
+    BLOCK_COMMENT("arrays_hashcode(short) {");
+    break;
+  case T_INT:
+    BLOCK_COMMENT("arrays_hashcode(int) {");
+    break;
+  default:
+    ShouldNotReachHere();
   }
 
-  // Emit entry block that either jumps to the Neon loop or falls through to the tail (see below).
-  //
-  // Pseudocode:
-  //
-  //  input_cnt = cnt;
-  //  cnt -= loop_factor;
-  //  if (input_cnt > unroll_factor)
-  //    goto .PREHEADER;
-  bind(ENTRY);
-
   subsw(cnt, cnt, loop_factor);
-  br(Assembler::HS, PREHEADER);
+  br(Assembler::LO, TAIL);
+
+  RuntimeAddress stub = RuntimeAddress(StubRoutines::aarch64::large_arrays_hashcode(eltype));
+  assert(stub.target() != nullptr, "array_hashcode stub has not been generated");
+  address tpc = trampoline_call(stub);
+  if (tpc == nullptr) {
+    DEBUG_ONLY(reset_labels(TAIL, RELATIVE));
+    postcond(pc() == badAddress);
+    return nullptr;
+  }
 
   bind(TAIL);
 
@@ -118,179 +113,30 @@ void C2_MacroAssembler::arrays_hashcode(Register ary, Register cnt, Register res
   subsw(cnt, cnt, unroll_factor);
   br(Assembler::HS, RELATIVE);
 
-  b(DONE);
-
-  bind(PREHEADER);
-
-  size_t                      bytes_per_iteration = loop_factor * arrays_hashcode_elsize(eltype);
-  Assembler::SIMD_Arrangement load_arrangement =
-      eltype == T_BOOLEAN || eltype == T_BYTE ? Assembler::T8B
-      : eltype == T_CHAR || eltype == T_SHORT ? Assembler::T4H
-      : eltype == T_INT                       ? Assembler::T4S
-                                              : Assembler::INVALID_ARRANGEMENT;
-  guarantee(load_arrangement != Assembler::INVALID_ARRANGEMENT, "invalid arrangement");
-
-  if (eltype == T_INT || eltype == T_CHAR || eltype == T_SHORT) {
-    // 31^16
-    movw(tmp1, 0xde01);
-    movkw(tmp1, 0x50a9, 16);
-    dup(vpowm, T4S, tmp1);
-    } else if (eltype == T_BOOLEAN || eltype == T_BYTE) {
-    // 31^4 - multiplier between lower and upper parts of a register
-    movw(tmp1, 0x1781);
-    movkw(tmp1, 0xe, 16);
-    dup(vpow, T4S, tmp1);
-    // 31^28 - remainder of the iteraion multiplier, 28 = 32 - 4
-    movw(tmp1, 0xe481);
-    movkw(tmp1, 0x294f, 16);
-    dup(vpowm, T4S, tmp1);
-  } else {
-    should_not_reach_here();
-  }
-
-  mov(vmul3, Assembler::T16B, 0);
-  mov(vmul2, Assembler::T16B, 0);
-  mov(vmul1, Assembler::T16B, 0);
-  mov(vmul0, Assembler::T16B, 0);
-  mov(vmul0, Assembler::S, 3, result);
-
-  bind(LOOP);
-
-    mulv(vmul3, Assembler::T4S, vmul3, vpowm);
-    mulv(vmul2, Assembler::T4S, vmul2, vpowm);
-    mulv(vmul1, Assembler::T4S, vmul1, vpowm);
-    mulv(vmul0, Assembler::T4S, vmul0, vpowm);
-
-    ld1(vdata3, vdata2, vdata1, vdata0, load_arrangement, Address(post(ary, bytes_per_iteration)));
-
-  if (eltype == T_BOOLEAN || eltype == T_BYTE) {
-    // Extend 8B to 8H to be able to use vector multiply instructions
-    assert(load_arrangement == Assembler::T8B, "expected to extend 8B to 8H");
-    if (is_signed_subword_type(eltype)) {
-      sxtl(vdata3, Assembler::T8H, vdata3, load_arrangement);
-      sxtl(vdata2, Assembler::T8H, vdata2, load_arrangement);
-      sxtl(vdata1, Assembler::T8H, vdata1, load_arrangement);
-      sxtl(vdata0, Assembler::T8H, vdata0, load_arrangement);
-    } else {
-      uxtl(vdata3, Assembler::T8H, vdata3, load_arrangement);
-      uxtl(vdata2, Assembler::T8H, vdata2, load_arrangement);
-      uxtl(vdata1, Assembler::T8H, vdata1, load_arrangement);
-      uxtl(vdata0, Assembler::T8H, vdata0, load_arrangement);
-    }
-  }
-
-  if (load_arrangement == Assembler::T4S) {
-    addv(vmul3, load_arrangement, vmul3, vdata3);
-    addv(vmul2, load_arrangement, vmul2, vdata2);
-    addv(vmul1, load_arrangement, vmul1, vdata1);
-    addv(vmul0, load_arrangement, vmul0, vdata0);
-  } else if (load_arrangement == Assembler::T4H || load_arrangement == Assembler::T8B) {
-    assert(is_subword_type(eltype), "subword type expected");
-    if (is_signed_subword_type(eltype)) {
-      sxtl(vhalf3, Assembler::T4S, vdata3, Assembler::T4H);
-      sxtl(vhalf2, Assembler::T4S, vdata2, Assembler::T4H);
-      sxtl(vhalf1, Assembler::T4S, vdata1, Assembler::T4H);
-      sxtl(vhalf0, Assembler::T4S, vdata0, Assembler::T4H);
-    } else {
-      uxtl(vhalf3, Assembler::T4S, vdata3, Assembler::T4H);
-      uxtl(vhalf2, Assembler::T4S, vdata2, Assembler::T4H);
-      uxtl(vhalf1, Assembler::T4S, vdata1, Assembler::T4H);
-      uxtl(vhalf0, Assembler::T4S, vdata0, Assembler::T4H);
-    }
-    addv(vmul3, Assembler::T4S, vmul3, vhalf3);
-    addv(vmul2, Assembler::T4S, vmul2, vhalf2);
-    addv(vmul1, Assembler::T4S, vmul1, vhalf1);
-    addv(vmul0, Assembler::T4S, vmul0, vhalf0);
-  } else {
-    should_not_reach_here();
-  }
-
-  // Process the upper half of a vector
-  if (load_arrangement == Assembler::T8B) {
-    mulv(vmul3, Assembler::T4S, vmul3, vpow);
-    mulv(vmul2, Assembler::T4S, vmul2, vpow);
-    mulv(vmul1, Assembler::T4S, vmul1, vpow);
-    mulv(vmul0, Assembler::T4S, vmul0, vpow);
-    if (is_signed_subword_type(eltype)) {
-      sshll2(vhalf3, Assembler::T4S, vdata3, Assembler::T8H, 0);
-      sshll2(vhalf2, Assembler::T4S, vdata2, Assembler::T8H, 0);
-      sshll2(vhalf1, Assembler::T4S, vdata1, Assembler::T8H, 0);
-      sshll2(vhalf0, Assembler::T4S, vdata0, Assembler::T8H, 0);
-    } else {
-      ushll2(vhalf3, Assembler::T4S, vdata3, Assembler::T8H, 0);
-      ushll2(vhalf2, Assembler::T4S, vdata2, Assembler::T8H, 0);
-      ushll2(vhalf1, Assembler::T4S, vdata1, Assembler::T8H, 0);
-      ushll2(vhalf0, Assembler::T4S, vdata0, Assembler::T8H, 0);
-    }
-    addv(vmul3, Assembler::T4S, vmul3, vhalf3);
-    addv(vmul2, Assembler::T4S, vmul2, vhalf2);
-    addv(vmul1, Assembler::T4S, vmul1, vhalf1);
-    addv(vmul0, Assembler::T4S, vmul0, vhalf0);
-  }
-
-  subsw(cnt, cnt, loop_factor);
-  br(Assembler::HS, LOOP);
-
-  // Put 0-3'th powers of 31 into a single SIMD register together.
-  movw(tmp1, 0x745f);
-  movw(tmp2, 0x3c1);
-  mov(vpow, Assembler::S, 0, tmp1);
-  mov(vpow, Assembler::S, 1, tmp2);
-  movw(tmp1, 0x1f);
-  movw(tmp2, 0x1);
-  mov(vpow, Assembler::S, 2, tmp1);
-  mov(vpow, Assembler::S, 3, tmp2);
-
-  mulv(vmul0, T4S, vmul0, vpow);
-  addv(vmul0, Assembler::T4S, vmul0);
-  umov(result, vmul0, Assembler::S, 0);
-
-  if (eltype == T_INT || eltype == T_SHORT || eltype == T_CHAR) {
-    // 31^4
-    movw(tmp1, 0x1781);
-    movkw(tmp1, 0xe, 16);
-  } else {
-    // 31^8 - the algorithm loads 32 elements to 4 registers per iteration,
-    // so 8 = 32 / 4
-    movw(tmp1, 0x6f01);
-    movkw(tmp1, 0x9444, 16);
-  }
-  dup(vpowm, T4S, tmp1);
-
-  // <31^7, ... ,31^4> = <31^3, ... ,31^0> * (31^4 or 31^8)
-  mulv(vpow, Assembler::T4S, vpow, vpowm);
-  mulv(vmul1, T4S, vmul1, vpow);
-  addv(vmul1, Assembler::T4S, vmul1);
-  umov(tmp1, vmul1, Assembler::S, 0);
-  addw(result, result, tmp1);
-
-  mulv(vpow, Assembler::T4S, vpow, vpowm);
-  mulv(vmul2, T4S, vmul2, vpow);
-  addv(vmul2, Assembler::T4S, vmul2);
-  umov(tmp1, vmul2, Assembler::S, 0);
-  addw(result, result, tmp1);
-
-  mulv(vpow, Assembler::T4S, vpow, vpowm);
-  mulv(vmul3, T4S, vmul3, vpow);
-  addv(vmul3, Assembler::T4S, vmul3);
-  umov(tmp1, vmul3, Assembler::S, 0);
-  addw(result, result, tmp1);
-
-  b(TAIL);
-
-  bind(DONE);
-
   BLOCK_COMMENT("} // arrays_hashcode");
+
+  postcond(pc() != badAddress);
+  return pc();
 }
 
 void C2_MacroAssembler::arrays_hashcode_elload(Register dst, Address src, BasicType eltype) {
   switch (eltype) {
   // T_BOOLEAN used as surrogate for unsigned byte
-  case T_BOOLEAN: ldrb(dst, src);  break;
-  case T_BYTE:    ldrsb(dst, src); break;
-  case T_SHORT:   ldrsh(dst, src); break;
-  case T_CHAR:    ldrh(dst, src);  break;
-  case T_INT:     ldrw(dst, src);  break;
+  case T_BOOLEAN:
+    ldrb(dst, src);
+    break;
+  case T_BYTE:
+    ldrsb(dst, src);
+    break;
+  case T_SHORT:
+    ldrsh(dst, src);
+    break;
+  case T_CHAR:
+    ldrh(dst, src);
+    break;
+  case T_INT:
+    ldrw(dst, src);
+    break;
   default:
     ShouldNotReachHere();
   }
@@ -298,11 +144,16 @@ void C2_MacroAssembler::arrays_hashcode_elload(Register dst, Address src, BasicT
 
 int C2_MacroAssembler::arrays_hashcode_elsize(BasicType eltype) {
   switch (eltype) {
-  case T_BOOLEAN: return sizeof(jboolean);
-  case T_BYTE:    return sizeof(jbyte);
-  case T_SHORT:   return sizeof(jshort);
-  case T_CHAR:    return sizeof(jchar);
-  case T_INT:     return sizeof(jint);
+  case T_BOOLEAN:
+    return sizeof(jboolean);
+  case T_BYTE:
+    return sizeof(jbyte);
+  case T_SHORT:
+    return sizeof(jshort);
+  case T_CHAR:
+    return sizeof(jchar);
+  case T_INT:
+    return sizeof(jint);
   default:
     ShouldNotReachHere();
     return -1;
