@@ -36,13 +36,11 @@
 
   // Helper functions for arrays_hashcode.
   void arrays_hashcode_elload(Register dst, Address src, BasicType eltype);
-  int  arrays_hashcode_elsize(BasicType eltype);
+  int arrays_hashcode_elsize(BasicType eltype);
 
  public:
   // jdk.internal.util.ArraysSupport.vectorizedHashCode
-  void arrays_hashcode(Register ary, Register cnt, Register result, Register tmp1,
-                       FloatRegister vtmp1, FloatRegister vtmp2, FloatRegister vtmp3,
-                       BasicType eltype);
+  address arrays_hashcode(Register ary, Register cnt, Register result, BasicType eltype);
 
   // Code used by cmpFastLock and cmpFastUnlock mach instructions in .ad file.
   void fast_lock(Register object, Register box, Register tmp, Register tmp2, Register tmp3);
